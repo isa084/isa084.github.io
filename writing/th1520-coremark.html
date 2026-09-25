@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Reproducing Sipeed's Lichee Pi 4A CoreMark result through controlled compiler, clock, and thermal experiments on the T-Head TH1520.">
+  <title>Reproducing the Lichee Pi 4A's CoreMark score — Isaar Ahmad</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell">
+      <a class="brand" href="../index.html">Isaar <span>Ahmad</span></a>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="../index.html">Home</a>
+        <a href="../about.html">About</a>
+        <a href="https://github.com/isa084">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <article>
+      <header class="article-head article-shell">
+        <div class="eyebrow">RISC-V · benchmarking · TH1520</div>
+        <h1>Reproducing the Lichee Pi 4A's official CoreMark score, one fix at a time</h1>
+        <p class="dek">Compiler options were worth 1.77×. System-side controls were worth 0.1%. Cooling mattered only when the operating system began to throttle the processor.</p>
+        <div class="article-meta">
+          <span>Isaar Ahmad</span>
+          <span>September 2026</span>
+          <span>10 min read</span>
+        </div>
+      </header>
+
+      <div class="prose article-shell">
+        <p>Sipeed advertises 13,220 CoreMark for the Lichee Pi 4A, or 7.15 CoreMark/MHz. I was able to reach <strong>12,897—97.6% of Sipeed's figure—at 6.98 CoreMark/MHz</strong>, using the documented compiler version and flags. The path to that result was more interesting than the final score: the compiler options were worth 1.77×, while the usual system-side controls were worth only 0.1%. Cooling did not matter until the chip reached 85 °C, at which point the OS started throttling the system and the score fell by 15%.</p>
+
+        <p>This article follows that path one step at a time. Reliable benchmarking is a system-level exercise: the application, operating system, compiler, and hardware configuration all matter simultaneously.</p>
+
+        <h2>The target and method</h2>
+
+        <p>Sipeed's <a href="https://wiki.sipeed.com/hardware/en/lichee/th1520/lpi4a/9_benchmark.html">benchmark page</a> provides two single-core runs at 1.85 GHz:</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Build</th><th>Compiler</th><th class="num">Iterations/s</th><th class="num">CoreMark/MHz</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Public toolchain</td><td>GCC 13.1.0</td><td class="num">9,175</td><td class="num">4.96</td></tr>
+              <tr><td>T-Head toolchain</td><td>GCC 10.4.0 (T-Head patched)</td><td class="num"><strong>13,220</strong></td><td class="num"><strong>7.15</strong></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>The recipe is the official <a href="https://github.com/eembc/coremark">EEMBC CoreMark</a> and one <code>make</code> line:</p>
+
+        <pre><code>make XCFLAGS="-march=rv64gv0p7_zfh_xtheadc -O3 -funroll-all-loops -finline-limit=500 \
+  -fgcse-sm -fno-schedule-insns -msignedness-cmpiv -fno-code-hoisting \
+  -mno-thread-jumps1 -mno-iv-adjust-addr-cost -mno-expand-split-imm"</code></pre>
+
+        <p>CoreMark/second is the standard reportable metric, but I also use <strong>CoreMark/MHz</strong> to compare CPU performance independently of operating frequency. That normalization is useful here because CoreMark is compute-bound; it should not be generalized to I/O- or memory-bound benchmarks.</p>
+
+        <h3>Test setup</h3>
+
+        <ul>
+          <li><strong>System:</strong> Lichee Pi 4A with 8 GB RAM, running RevyOS 2026-05 (Linux 6.6.137, Debian 13).</li>
+          <li><strong>Compiler:</strong> XuanTie GCC V2.8.0, which is GCC 10.4.0 with T-Head's patches, used to cross-compile from x86-64. Sipeed used this version for their public-facing data, and I have used the same for consistency.</li>
+          <li><strong>Clock control:</strong> Frequency pinned at 1.848 GHz with the <code>performance</code> governor.</li>
+          <li><strong>Affinity control:</strong> I kept the default Linux scheduler policy, but pinned every CoreMark run to core 3 with <code>taskset -c 3</code>.</li>
+          <li><strong>Cooling:</strong> A heatsink, a thermal pad, and an OS-controlled fan were fitted on the board for most experiments, unless stated otherwise. The impact of these choices on temperature, CPU frequency, and benchmark performance is discussed later.</li>
+          <li><strong>Runs:</strong> Three per build, using CoreMark's automatic iteration count so that each ran for at least 10 seconds. Variability was 0.1% to 1%, and I reported the median.</li>
+        </ul>
+
+        <h3>Verifying the clock</h3>
+
+        <p>The per-MHz score is derived as follows:</p>
+
+        <div class="formula" aria-label="CoreMark per megahertz equals number of iterations divided by elapsed seconds multiplied by frequency in megahertz">
+          CoreMark/MHz = <i>N</i><sub>iterations</sub> / (<i>t</i><sub>seconds</sub> × <i>f</i><sub>MHz</sub>)
+        </div>
+
+        <p>Because frequency appears directly in the score and can vary for several reasons, I checked the delivered clock against the requested clock. For this purpose, I wrote a small <code>perf_event_open</code> microbenchmark that estimated frequency using the clock cycle counter and elapsed wall-clock time. Requested frequencies of 1,500 MHz and 1,848 MHz measured <strong>1,499.4 MHz</strong> and <strong>1,847.2 MHz</strong> across repeated runs (about <strong>0.04%</strong> below nominal). Satisfied with the stability, I used the nominal 1,848 MHz for the experiments below.</p>
+
+        <h2>The optimization ladder</h2>
+
+        <p>I started with a plain <code>-O2</code> build under the <code>schedutil</code> governor, then changed one thing at a time: system controls first, compiler options next. All runs used the same board on the same day with the heatsink fitted, and each row includes every change above it.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th class="num">#</th><th>Cumulative change</th><th class="num">Iterations/s</th><th class="num">CoreMark/MHz</th><th class="num">Step</th><th>What it showed</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="num">0</td><td>Baseline: <code>-O2</code>, <code>schedutil</code>, no pinning</td><td class="num">7,278</td><td class="num">3.94</td><td class="num">–</td><td>Starting point</td></tr>
+              <tr><td class="num">1</td><td><code>performance</code> governor</td><td class="num">7,284</td><td class="num">3.94</td><td class="num">+0.1%</td><td>RevyOS's default; no material gain</td></tr>
+              <tr><td class="num">2</td><td>Pin the task to core 3</td><td class="num">7,283</td><td class="num">3.94</td><td class="num">0%</td><td>Better control, not more speed</td></tr>
+              <tr><td class="num">3</td><td>Pin the clock at 1.848 GHz</td><td class="num">7,289</td><td class="num">3.94</td><td class="num">+0.1%</td><td>Better control, not more speed</td></tr>
+              <tr><td class="num">4</td><td><code>-O3</code></td><td class="num">8,094</td><td class="num">4.38</td><td class="num"><strong>+11%</strong></td><td>First clear compiler gain</td></tr>
+              <tr><td class="num">5</td><td>T-Head instructions (<code>-march=…_xtheadc</code>)</td><td class="num">10,314</td><td class="num">5.58</td><td class="num"><strong>+27%</strong></td><td>Largest single improvement</td></tr>
+              <tr><td class="num">6</td><td><code>-funroll-all-loops -finline-limit=500</code></td><td class="num">11,710</td><td class="num">6.34</td><td class="num"><strong>+14%</strong></td><td>Second-largest improvement</td></tr>
+              <tr><td class="num">7</td><td><code>-fgcse-sm -fno-schedule-insns -fno-code-hoisting</code></td><td class="num">12,120</td><td class="num">6.56</td><td class="num">+3.5%</td><td>Modest but repeatable gain</td></tr>
+              <tr><td class="num">8</td><td>T-Head-only options (<code>-msignedness-cmpiv</code> …)</td><td class="num">12,859</td><td class="num">6.96</td><td class="num"><strong>+6.1%</strong></td><td>Vendor-specific tuning still mattered</td></tr>
+              <tr><td class="num">9</td><td>Sipeed's <code>-march=rv64gv0p7_zfh_xtheadc</code></td><td class="num"><strong>12,897</strong></td><td class="num"><strong>6.98</strong></td><td class="num">+0.3%</td><td>Final result: 97.6% of Sipeed's score</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Run-to-run spread was tiny: within ±0.1% for every row except #5, which varied by about 1%. In a separate test, <code>-mtune=c910</code> also made no difference: 6.96 CoreMark/MHz either way. Perhaps <code>-fno-schedule-insns</code> disables the pass that would have benefited from it.</p>
+
+        <h3>What Sipeed's <code>-march</code> actually changed</h3>
+
+        <p>Sipeed's <code>rv64gv0p7</code> target includes version 0.7.1 of the RISC-V vector extension, but the compiler emitted no vector instructions for CoreMark. Vector support therefore did not produce the row 9 result.</p>
+
+        <p>The other detail is what the target omits: <code>rv64g</code> has no <strong>compressed instruction extension (<code>c</code>)</strong>, so it cannot use the smaller 16-bit encodings. I expected that to hurt performance through extra instruction-fetch and cache pressure. It did not. In a matched <code>rv64gc</code> test, the compressed and uncompressed builds differed by only 0.016%. <strong>For CoreMark on this C910, instruction fetch was not the limiting factor.</strong></p>
+
+        <figure>
+          <img src="../assets/rvc-comparison-chart.png" alt="Comparison of rv64g and rv64gc CoreMark performance and code size">
+          <figcaption><code>rv64gc</code> reduced code size without measurably changing CoreMark performance.</figcaption>
+        </figure>
+
+        <p>The layout still changed: row 9's uncompressed objects contain 181 <code>nop</code>s (724 bytes), compared with 378 <code>nop</code>s (1,114 bytes) in row 8. The matched test found no measurable compression effect, so row 9's 0.3% ladder gain cannot confidently be attributed to that padding.</p>
+
+        <h2>Thermal throttling and cooling</h2>
+
+        <p>The system-side controls changed the score by almost nothing because the hardware underneath was in order. I kept row 9 unchanged—1.848 GHz, core 3, same binary—and varied only the cooling. Temperature, actual clock, and throttling state were logged every second across six back-to-back runs, extended by 14 runs once the bare chip began throttling.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Cooling</th><th>Chip temperature</th><th>Clock actually delivered</th><th>Iterations/s</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Heatsink mounted with a thermal pad, fan on</td><td>53 → 54 °C</td><td>1,848 MHz, all the time</td><td>12,871–12,914</td></tr>
+              <tr><td>Heatsink resting loosely on the chip, fan on</td><td>53 → 61 °C</td><td>1,848 MHz, all the time</td><td>12,869–12,880</td></tr>
+              <tr><td>Bare chip, starting warm</td><td>66 → 85 °C, still climbing</td><td>1,848 MHz, all the time</td><td>12,870–12,888</td></tr>
+              <tr><td>Bare chip, once it reached 85 °C (14 more runs)</td><td>held at 83–85 °C</td><td>61% at 1,608 MHz, 29% at 1,500 MHz, 4% at 1,848 MHz</td><td>10,900–11,050 (<strong>−15%</strong>)</td></tr>
+              <tr><td>Heatsink put back, starting hot</td><td>61 → 65 °C</td><td>1,848 MHz, all the time</td><td>12,871–12,889</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <figure>
+          <img src="../assets/thermal-chart.png" alt="Steady-state and transient temperature measurements for the Lichee Pi 4A cooling configurations">
+          <figcaption>Steady-state temperatures by cooling configuration, followed by the transient rise to the 85 °C throttle point.</figcaption>
+        </figure>
+
+        <h3>What the logs showed</h3>
+
+        <ul>
+          <li><strong>Below 85 °C, temperature did not affect performance.</strong> A mounted heatsink, a loose heatsink, and no heatsink all produced the same score while the CPU delivered 1.848 GHz.</li>
+          <li><strong>At 85 °C, the kernel intervened.</strong> Its <code>cpufreq</code> cooling policy held the bare chip at 83–85 °C, mostly at 1,608 MHz, and the score fell by 15%. CoreMark still printed “Correct operation validated”; only the temperature and frequency logs revealed the throttling.</li>
+          <li><strong>Recovery was immediate.</strong> Replacing the heatsink restored the full clock and a score of 12,886 on the first run.</li>
+        </ul>
+
+        <p>Without the temperature and frequency logs, that 15% thermal loss would look exactly like a software regression.</p>
+
+        <h2>How a timer oversight led to the wrong conclusion</h2>
+
+        <p>This was actually my second attempt at this benchmark. About a year ago, I ran it on the same board, once with the T-Head GCC toolchain and once with a stock GCC. The two builds reported <strong>5,134</strong> and <strong>5,145 iterations per second</strong>, respectively. Practically identical. I concluded that the custom toolchain made no difference, and I moved on. That conclusion was wrong.</p>
+
+        <p>The mistake was in my measurement setup: I compared the final scores without checking how each platform port measured time. For the T-Head build, I used the public <a href="https://github.com/riscv-boom/riscv-coremark">riscv-boom/riscv-coremark wrapper</a>. Its <a href="https://github.com/riscv-boom/riscv-coremark/blob/master/build-coremark.sh">build script</a> produces a <code>coremark.riscv</code> binary with the included <code>riscv64</code> port, so it looked like a reasonable starting point. What I missed was that this was a third-party port, not T-Head code or CoreMark's official Linux port.</p>
+
+        <p>CoreMark delegates timing to the platform port, so my two binaries were using different rulers:</p>
+
+        <ul>
+          <li>The stock build used CoreMark's <a href="https://github.com/eembc/coremark/blob/main/posix/core_portme.c">Linux/POSIX port</a>, which reads wall-clock time.</li>
+          <li>The T-Head-compiled build used the wrapper's <a href="https://github.com/riscv-boom/riscv-coremark/blob/master/riscv64/core_portme.c">RISC-V port</a>, which reads the <strong>cycle counter</strong> and divides by a <strong>hard-coded 1,000,000,000</strong>. It assumes a 1 GHz CPU; the source even says <code>// TODO: What freq are we assuming?</code>. My board ran at 1.848 GHz.</li>
+        </ul>
+
+        <figure>
+          <img src="../assets/timer-ports-comparison.png" alt="Source comparison showing wall-clock timing in the Linux port and a fixed one-gigahertz cycle conversion in the RISC-V port">
+          <figcaption>The official Linux port measures wall-clock time; the third-party RISC-V port converts cycles using a fixed 1 GHz assumption.</figcaption>
+        </figure>
+
+        <p>The reported 5,134 was therefore iterations per billion cycles, not per second. At 1.848 GHz, it becomes roughly <strong>9,490 iterations per second</strong>, or 5.13 CoreMark/MHz. The stock build's 5,145 was only 2.78 CoreMark/MHz. The T-Head-compiled build had been about 1.85× faster all along; the results looked equal only because their units differed. That low-level oversight propagated upward: the wrong elapsed time produced the wrong score, and the wrong score produced the wrong conclusion about the compiler.</p>
+
+        <p class="article-note">Lesson learnt: <strong>a benchmark number on its own is not a result.</strong> The timer, CPU frequency, affinity, thermal state, and surrounding workload belong next to the score.</p>
+
+        <h2>What next?</h2>
+
+        <p>The defensible result today is that this board reproducibly reaches 12,897 iterations per second at 1.848 GHz with the documented compiler and flags: 6.98 CoreMark/MHz and 97.6% of Sipeed's figure. The remaining work is:</p>
+
+        <ul>
+          <li><strong>Investigate the remaining 2.4%:</strong> compare a native, dynamically linked build with my cross-compiled static build, investigate the vendor kernel and firmware, and determine what clock Sipeed's board actually delivered.</li>
+          <li><strong>Try 2 GHz:</strong> <a href="https://wiki.sipeed.com/hardware/en/lichee/th1520/lpi4a/2_unbox.html#overclocking">Sipeed says</a> that some boards can reach it. I want to measure the actual clock, scaling, temperature, and stability.</li>
+          <li><strong>Measure power:</strong> compare board-input power at idle and under load across the same frequency steps.</li>
+          <li><strong>Expand the workloads:</strong> run four-thread CoreMark, then try OpenSSL, Dhrystone, Geekbench, and smaller tests that isolate parts of the C910.</li>
+          <li><strong>Compare other boards:</strong> repeat the method on Raspberry Pi and other RISC-V systems to separate the CPU, compiler, clock policy, cooling, and surrounding system.</li>
+        </ul>
+
+        <p>If there is another benchmark or configuration that would make the comparison more useful, please suggest it. I will release the build and measurement scripts once the repository is tidied up.</p>
+      </div>
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell">
+      <span>© 2026 Isaar Ahmad</span>
+      <span><a href="../index.html">Home</a> · <a href="../about.html">About</a></span>
+    </div>
+  </footer>
+</body>
+</html>
