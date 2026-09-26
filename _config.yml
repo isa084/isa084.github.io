@@ -10,7 +10,7 @@ contact_note:
 description: > # the ">" symbol means to ignore newlines until "footer_text:"
   Isaar Ahmad is a semiconductor engineer and researcher working on processor systems, RISC-V, verification, and performance.
 footer_text: >
-  © 2026 Isaar Ahmad. Built with <a href="https://github.com/alshedivat/al-folio">al-folio</a>.
+  Built with <a href="https://github.com/alshedivat/al-folio">al-folio</a>.
 keywords: semiconductor engineering, RISC-V, processor systems, SoC verification, performance, FPGA
 lang: en # the language of your site (for example: en, fr, cn, ru, etc.)
 icon: IA # the emoji used as the favicon (alternatively, provide image name in /assets/img/)
