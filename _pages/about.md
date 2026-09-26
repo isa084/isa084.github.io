@@ -6,7 +6,7 @@ subtitle: Research Fellow at the <a href="https://research-information.bris.ac.u
 
 profile: false
 selected_papers: false
-social: true
+social: false
 
 announcements:
   enabled: false
