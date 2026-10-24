@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "Tracking CVA6 area and timing with an open-source flow"
-date: 2026-10-25 09:00:00 +0100
+date: 2026-10-24 21:00:00 +0100
 description: A public dashboard of area and timing for the latest CVA6 RTL, produced with OpenROAD-flow-scripts on ASAP7 and Nangate45.
 tags: risc-v cva6 asic openroad
 categories: projects
